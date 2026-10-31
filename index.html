@@ -595,7 +595,13 @@ async function showLock() {
   const m = await getAuth();
   setupMode = !m;
   $("lockTitle").textContent = setupMode ? "비밀번호 만들기" : "보관함 잠김";
-  $("lockSub").textContent = setupMode ? "8자 이상으로 만들어 주세요. 잊어버리면 사진을 복구할 수 없어요." : "비밀번호를 입력해 주세요.";
+  const standalone = window.navigator.standalone === true || (window.matchMedia && matchMedia("(display-mode: standalone)").matches);
+  const iosTab = /iPhone|iPad/.test(navigator.userAgent) && !standalone;
+  $("lockSub").textContent = setupMode
+    ? (iosTab
+        ? "여기서 만들면 나중에 사라질 수 있어요. 공유 → 홈 화면에 추가를 한 뒤, 그 아이콘으로 열어서 만들어 주세요."
+        : "8자 이상으로 만들어 주세요. 잊어버리면 사진을 복구할 수 없어요.")
+    : "비밀번호를 입력해 주세요.";
   pw1.value = ""; pw2.value = "";
   pw1.placeholder = setupMode ? "새 비밀번호" : "비밀번호";
   pw2.style.display = setupMode ? "" : "none";
@@ -757,6 +763,7 @@ document.addEventListener("visibilitychange", () => {
       return;
     }
     db = await openDB();
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
     await showLock();
   } catch (err) {
     lockMsg.textContent = "저장소를 열 수 없어요: " + err.message;
