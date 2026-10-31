@@ -8,12 +8,12 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Gallery">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="theme-color" content="#e9e4f7">
+<meta name="theme-color" content="#ffffff">
 <link rel="apple-touch-icon" href="icon.png">
 
 <style>
-:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#e9e4f7;--fg:#3d3560;--accent:#7a66d8;--muted:#7a73a0;--chip:#d8d0f0;--line:#c4b8ec}
-@media (prefers-color-scheme: dark){:root{--bg:#231f33;--fg:#e6e1f7;--accent:#8a76e0;--muted:#a29bc8;--chip:#342e4d;--line:#4a4270}}
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#ffffff;--fg:#1c1c1e;--accent:#1c1c1e;--muted:#8e8e93;--chip:#f2f2f7;--line:#d1d1d6}
+@media (prefers-color-scheme: dark){:root{--bg:#000000;--fg:#f2f2f7;--accent:#3a3a3c;--muted:#98989d;--chip:#1c1c1e;--line:#38383a}}
 *{box-sizing:border-box}
 body{margin:0;font-family:system-ui,-apple-system,'Apple SD Gothic Neo','Noto Sans KR',sans-serif;background:var(--bg);color:var(--fg);min-height:100vh}
 button,select,input{font-family:inherit}
@@ -764,11 +764,17 @@ function openLegacy() {
   });
 }
 
-function setPwPane(title, sub, placeholder, auto, confirmField, btnText) {
+function setPwPane(title, sub, placeholder, auto, confirmField, btnText, numeric) {
   $("lockTitle").textContent = title;
   $("lockSub").textContent = sub;
   pw1.value = ""; pw2.value = "";
   pw1.placeholder = placeholder;
+  pw2.placeholder = placeholder + " 다시 입력";
+  for (const el of [pw1, pw2]) {
+    el.dataset.num = numeric ? "1" : "0";
+    el.inputMode = numeric ? "numeric" : "text";
+    el.maxLength = numeric ? 4 : 128;
+  }
   pw1.setAttribute("autocomplete", auto);
   pw2.style.display = confirmField ? "" : "none";
   lockGo.textContent = btnText;
@@ -790,7 +796,9 @@ async function startUnlockDial() {
   $("lockTitle").textContent = "보관함 잠김";
   $("lockSub").textContent = "다이얼을 돌려 번호 3개를 맞춰 주세요.";
   tmpCombo = await runDial(false);
-  setPwPane("보관함 잠김", "마지막으로 비밀번호를 입력해 주세요.", "비밀번호", "off", false, "열기");
+  const pin = !!authMeta.pin;
+  setPwPane("보관함 잠김", pin ? "마지막으로 숫자 4자리를 입력해 주세요." : "마지막으로 비밀번호를 입력해 주세요.",
+    pin ? "숫자 4자리" : "비밀번호", "off", false, "열기", pin);
 }
 faceGo.onclick = async () => {
   lockMsg.textContent = "Face ID 확인 중...";
@@ -860,26 +868,26 @@ async function askNewCombo() {
 }
 async function createVault(pw, combo, dkRaw) {
   dkRaw = dkRaw || rnd(32);
-  const salt = rnd(16), iter = 250000;
+  const salt = rnd(16), iter = 500000;
   const kekRaw = await deriveRaw(pw + "\u0000" + combo.join("-"), salt, iter);
   const kek = await importKey(kekRaw);
   const wIv = rnd(12);
   const wrapped = await crypto.subtle.encrypt({ name: "AES-GCM", iv: wIv }, kek, dkRaw);
   key = await importKey(dkRaw);
   const c = await encBytes(te.encode("vault-ok"));
-  await run(store(META, "readwrite").put({ id: "auth", ver: 3, salt, iter, wIv, wrapped, chkIv: c.iv, chk: c.data }));
+  await run(store(META, "readwrite").put({ id: "auth", ver: 3, pin: /^\d{4}$/.test(pw), salt, iter, wIv, wrapped, chkIv: c.iv, chk: c.data }));
 }
 
 function startSetupPw() {
   mode = "setup";
   setPwPane("비밀번호 만들기",
     isIosTab() ? "여기서 만들면 나중에 사라질 수 있어요. 공유 → 홈 화면에 추가를 한 뒤, 그 아이콘으로 열어서 만들어 주세요."
-               : "8자 이상으로 만들어 주세요. 잊어버리면 복구할 수 없어요.",
-    "새 비밀번호", "new-password", true, "다음");
+               : "숫자 4자리로 만들어 주세요. 잊어버리면 복구할 수 없어요.",
+    "숫자 4자리", "new-password", true, "다음", true);
 }
 async function submitSetup() {
   const a = pw1.value;
-  if (a.length < 8) { lockMsg.textContent = "8자 이상으로 만들어 주세요."; return; }
+  if (!/^\d{4}$/.test(a)) { lockMsg.textContent = "숫자 4자리로 만들어 주세요."; return; }
   if (a !== pw2.value) { lockMsg.textContent = "두 비밀번호가 달라요."; return; }
   setBusy(true);
   lockMsg.textContent = "";
@@ -901,7 +909,7 @@ function startMigratePw() {
   mode = "migrate";
   setPwPane("보관함 업그레이드",
     "다이얼 잠금이 추가됐어요. 먼저 지금 쓰는 비밀번호를 입력해 주세요. 사진과 영상은 그대로 옮겨져요.",
-    "지금 비밀번호", "current-password", false, "다음");
+    "지금 비밀번호", "current-password", false, "다음", false);
 }
 async function submitMigrate() {
   const wait = lockedUntil - Date.now();
@@ -1040,6 +1048,7 @@ async function disableFace() {
 
 lockGo.onclick = submitLock;
 [pw1, pw2].forEach(el => el.addEventListener("keydown", (e) => { if (e.key === "Enter") submitLock(); }));
+[pw1, pw2].forEach(el => el.addEventListener("input", () => { if (el.dataset.num === "1") el.value = el.value.replace(/\D/g, "").slice(0, 4); }));
 $("lockBtn").onclick = lockNow;
 $("faceBtn").onclick = async () => {
   const m = await getAuth();
@@ -1053,6 +1062,21 @@ document.addEventListener("visibilitychange", () => {
   else if (key && hiddenAt && Date.now() - hiddenAt > AUTO_LOCK_MS) lockNow();
 });
 
+// 초기화 표식: 이 값이 저장된 값과 다르면 저장된 모든 데이터(사진·영상·잠금 정보)를 한 번 지우고 처음부터 시작
+const RESET_ID = "reset-1";
+async function applyReset() {
+  const mark = await run(store(META, "readonly").get("resetMark"));
+  if (mark && mark.v === RESET_ID) return;
+  for (const s of [PHOTOS, ALBUMS, VIDS, META]) await run(store(s, "readwrite").clear());
+  await new Promise((resolve) => {
+    try {
+      const q = indexedDB.deleteDatabase(LEGACY);
+      q.onsuccess = q.onerror = q.onblocked = () => resolve();
+    } catch (e) { resolve(); }
+  });
+  await run(store(META, "readwrite").put({ id: "resetMark", v: RESET_ID }));
+}
+
 (async function init() {
   try {
     if (!window.crypto || !crypto.subtle) {
@@ -1062,6 +1086,7 @@ document.addEventListener("visibilitychange", () => {
     }
     db = await openDB();
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+    await applyReset();
     await showLock();
   } catch (err) {
     lockMsg.textContent = "저장소를 열 수 없어요: " + err.message;
