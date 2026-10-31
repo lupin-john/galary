@@ -38,14 +38,20 @@ input[type=file]{display:none}
 .cell{position:relative}
 .dur{position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.55);color:#fff;font-size:11px;border-radius:8px;padding:2px 7px;pointer-events:none}
 
-#lock{position:fixed;inset:0;z-index:50;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:24px}
+#lock{position:fixed;inset:0;z-index:50;background:var(--bg);display:flex;padding:24px;overflow-y:auto}
 #lock.off{display:none}
-.lockbox{width:100%;max-width:340px;display:flex;flex-direction:column;gap:12px;text-align:center}
+.lockbox{width:100%;max-width:340px;display:flex;flex-direction:column;gap:12px;text-align:center;margin:auto}
 .lockbox svg{width:44px;height:44px;margin:0 auto;stroke:var(--accent);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .lockbox h2{margin:0;font-size:20px;font-weight:600}
 .lockbox p{margin:0;font-size:13px;color:var(--muted);min-height:18px}
 .lockbox input{padding:13px 14px;border-radius:12px;border:1px solid var(--muted);background:var(--bg);color:var(--fg);font-size:16px;text-align:center}
 .lockbox .btn{padding:13px 14px;font-size:16px}
+.pane{display:flex;flex-direction:column;gap:12px;align-items:stretch}
+#dial{width:min(80vw,300px);height:auto;margin:0 auto;touch-action:none;user-select:none;-webkit-user-select:none;cursor:grab}
+#dial.shake{animation:shake .3s}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-8px)}75%{transform:translateX(8px)}}
+#dots{font-size:20px;letter-spacing:3px;color:var(--accent);min-height:26px}
+.hap{position:fixed;left:-200px;top:0;opacity:0;pointer-events:none}
 
 #viewer{position:fixed;inset:0;background:#000;color:#fff;display:none;z-index:10;transition:background .2s;user-select:none;-webkit-user-select:none}
 #viewer.open{display:block}
@@ -114,22 +120,44 @@ html.wht,html.wht body{background:#fff}
     <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
     <h2 id="lockTitle">보관함 잠김</h2>
     <p id="lockSub"></p>
-    <input id="pw1" type="password" placeholder="비밀번호" autocomplete="current-password">
-    <input id="pw2" type="password" placeholder="비밀번호 다시 입력" autocomplete="new-password" style="display:none">
-    <button class="btn" id="lockGo">열기</button>
-    <button class="small" id="faceGo" style="display:none;padding:11px">Face ID로 열기</button>
+
+    <div id="pFace" class="pane" style="display:none">
+      <button class="btn" id="faceGo">Face ID로 시작</button>
+      <button class="small" id="faceSkip" style="display:none;padding:11px">Face ID 없이 계속</button>
+    </div>
+
+    <div id="pDial" class="pane" style="display:none">
+      <svg id="dial" viewBox="-155 -155 310 310">
+        <circle r="148" style="fill:var(--chip);stroke:var(--line);stroke-width:2"/>
+        <g id="ring" style="color:var(--fg)"></g>
+        <circle r="70" style="fill:var(--bg);stroke:var(--line);stroke-width:2"/>
+        <text id="dialNum" x="0" y="0" text-anchor="middle" dominant-baseline="central" font-size="44" font-weight="700" style="fill:var(--fg)">0</text>
+        <polygon points="0,-150 -9,-134 9,-134" style="fill:var(--accent)"/>
+      </svg>
+      <div id="dots"></div>
+      <p id="dialHint"></p>
+      <button class="btn" id="dialOk">확인</button>
+    </div>
+
+    <div id="pPw" class="pane" style="display:none">
+      <input id="pw1" type="password" placeholder="비밀번호" autocomplete="off">
+      <input id="pw2" type="password" placeholder="비밀번호 다시 입력" autocomplete="new-password" style="display:none">
+      <button class="btn" id="lockGo">열기</button>
+    </div>
     <p id="lockMsg"></p>
   </div>
 </div>
+<label id="hapLabel" class="hap"><input type="checkbox" switch></label>
 
 <script>
-const DB_NAME = "photo-vault", PHOTOS = "photos", ALBUMS = "albums", VIDS = "vids", META = "meta";
+const LEGACY = "photo-vault", DB_NAME = "gallery-vault", PHOTOS = "photos", ALBUMS = "albums", VIDS = "vids", META = "meta";
 let db = null, currentId = null;
 let photos = [], albums = [];
 let current = "all";
 let viewList = [], viewIdx = 0, curVidUrl = null;
-let key = null, vaultRaw = null;
-let setupMode = false, fails = 0, lockedUntil = 0, hiddenAt = 0;
+let key = null;
+let mode = "unlock", authMeta = null, legacyDb = null, legacyAuth = null, legacyKey = null, tmpCombo = null;
+let fails = 0, lockedUntil = 0, hiddenAt = 0;
 
 const $ = (id) => document.getElementById(id);
 const grid = $("grid"), empty = $("empty"), statusEl = $("status"), viewer = $("viewer"), big = $("big"), stage = $("stage"), strip = $("strip"), bigv = $("bigv");
@@ -166,13 +194,13 @@ async function deriveRaw(password, salt, iter) {
   return new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: iter }, base, 256));
 }
 const importKey = (raw) => crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
-async function encBytes(bytes) {
+async function encBytes(bytes, k = key) {
   const iv = rnd(12);
-  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, bytes);
+  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, k, bytes);
   return { iv, data };
 }
-async function decBytes(iv, data) {
-  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data));
+async function decBytes(iv, data, k = key) {
+  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, k, data));
 }
 const encJson = (o) => encBytes(te.encode(JSON.stringify(o)));
 async function decJson(rec) { return JSON.parse(td.decode(await decBytes(rec.iv, rec.data))); }
@@ -203,31 +231,6 @@ async function removePhoto(id) {
   await run(store(VIDS, "readwrite").delete(id));
 }
 
-// 예전(암호화 전) 데이터가 있으면 암호화해서 교체
-async function migrateLegacy() {
-  const recs = await run(store(PHOTOS, "readonly").getAll());
-  for (const r of recs) {
-    if (r.v === 2) continue;
-    try {
-      let dataUrl = r.dataUrl;
-      if (!dataUrl && r.blob && r.type !== "video") dataUrl = await toDataUrl(r.blob);
-      if (!dataUrl) { await run(store(PHOTOS, "readwrite").delete(r.id)); continue; }
-      if (r.type === "video" && r.blob) {
-        const ve = await encBytes(new Uint8Array(await r.blob.arrayBuffer()));
-        await run(store(VIDS, "readwrite").put({ id: r.id, iv: ve.iv, data: ve.data, vtype: r.blob.type || "video/mp4" }));
-      }
-      const e = await encJson({ dataUrl, name: r.name, added: r.added, albumId: r.albumId == null ? null : r.albumId, type: r.type || "image", duration: r.duration || 0 });
-      await run(store(PHOTOS, "readwrite").put({ id: r.id, v: 2, iv: e.iv, data: e.data }));
-    } catch (err) { /* 변환 실패한 항목은 그대로 둠 */ }
-  }
-  const arecs = await run(store(ALBUMS, "readonly").getAll());
-  for (const r of arecs) {
-    if (r.v === 2 || !r.name) continue;
-    const e = await encJson({ name: r.name, created: r.created || Date.now() });
-    await run(store(ALBUMS, "readwrite").put({ id: r.id, v: 2, iv: e.iv, data: e.data }));
-  }
-}
-
 function toDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -251,7 +254,6 @@ function toDataUrl(file) {
 }
 
 async function loadAll() {
-  await migrateLegacy();
   const recs = await run(store(PHOTOS, "readonly").getAll());
   const list = [];
   for (const r of recs) {
@@ -588,30 +590,393 @@ twoStep($("albumDel"), "이 항목 삭제", async () => {
   await loadAll();
 });
 
-/* ---------- 잠금 화면 / Face ID ---------- */
+/* ---------- 잠금 (Face ID → 다이얼 3개 → 비밀번호) ---------- */
 async function getAuth() { return run(store(META, "readonly").get("auth")); }
 
-async function showLock() {
-  const m = await getAuth();
-  setupMode = !m;
-  $("lockTitle").textContent = setupMode ? "비밀번호 만들기" : "보관함 잠김";
+const panes = { face: $("pFace"), dial: $("pDial"), pw: $("pPw") };
+function showPane(name) { for (const k in panes) panes[k].style.display = k === name ? "" : "none"; }
+function isIosTab() {
   const standalone = window.navigator.standalone === true || (window.matchMedia && matchMedia("(display-mode: standalone)").matches);
-  const iosTab = /iPhone|iPad/.test(navigator.userAgent) && !standalone;
-  $("lockSub").textContent = setupMode
-    ? (iosTab
-        ? "여기서 만들면 나중에 사라질 수 있어요. 공유 → 홈 화면에 추가를 한 뒤, 그 아이콘으로 열어서 만들어 주세요."
-        : "8자 이상으로 만들어 주세요. 잊어버리면 사진을 복구할 수 없어요.")
-    : "비밀번호를 입력해 주세요.";
-  pw1.value = ""; pw2.value = "";
-  pw1.placeholder = setupMode ? "새 비밀번호" : "비밀번호";
-  pw2.style.display = setupMode ? "" : "none";
-  lockGo.textContent = setupMode ? "만들기" : "열기";
+  return /iPhone|iPad/.test(navigator.userAgent) && !standalone;
+}
+
+/* ----- 다이얼 ----- */
+const DIRS = [1, -1, 1];   // 오른쪽 → 왼쪽 → 오른쪽
+let dialResolve = null, dialStep = 0, dialCombo = [], dialNet = 0, dialTheta = 0, lastTick = 0, dragging = false, lastAng = 0, showNums = false;
+const dialSvg = $("dial"), ringG = $("ring");
+
+(function buildDial() {
+  const NS = "http://www.w3.org/2000/svg";
+  const mkEl = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+  for (let n = 0; n < 100; n++) {
+    const a = -n * 3.6;
+    const len = n % 10 === 0 ? 16 : (n % 5 === 0 ? 10 : 6);
+    const g = mkEl("g", { transform: `rotate(${a})` });
+    g.appendChild(mkEl("line", { x1: 0, y1: -126, x2: 0, y2: -126 + len, stroke: "currentColor", "stroke-width": n % 10 === 0 ? 2.2 : 1, "stroke-linecap": "round" }));
+    ringG.appendChild(g);
+    if (n % 10 === 0) {
+      const t = mkEl("text", { x: 0, y: 0, "text-anchor": "middle", "dominant-baseline": "central", "font-size": 13, "font-weight": 600, fill: "currentColor", transform: `rotate(${a}) translate(0,-100) rotate(${-a})` });
+      t.textContent = String(n);
+      ringG.appendChild(t);
+    }
+  }
+})();
+
+const tickIdx = () => Math.round(dialTheta / 3.6);
+const curNum = () => ((tickIdx() % 100) + 100) % 100;
+function renderDial() {
+  ringG.setAttribute("transform", `rotate(${tickIdx() * 3.6})`);
+  $("dialNum").textContent = String(curNum());
+}
+function updateDialUI() {
+  const marks = [0, 1, 2].map(i => i < dialStep ? "●" : (i === dialStep ? "◉" : "○")).join(" ");
+  $("dots").textContent = marks + (showNums && dialCombo.length ? "   " + dialCombo.join(" – ") : "");
+  $("dialHint").textContent = DIRS[dialStep] > 0 ? "오른쪽(시계 방향)으로 돌려 번호를 맞추고 확인" : "왼쪽(반시계 방향)으로 돌려 번호를 맞추고 확인";
+  renderDial();
+}
+function runDial(show) {
+  return new Promise((resolve) => {
+    dialResolve = resolve; showNums = !!show;
+    dialStep = 0; dialCombo = []; dialNet = 0; lastTick = tickIdx();
+    updateDialUI();
+    showPane("dial");
+  });
+}
+function stopDial() { dialResolve = null; dragging = false; }
+
+/* 딸깍 소리 + 진동 (진동은 기기·브라우저에 따라 안 될 수 있음) */
+let actx = null;
+function ensureAudio() {
+  try {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === "suspended") actx.resume();
+  } catch (e) {}
+}
+function clickSound(strong) {
+  if (!actx) return;
+  try {
+    const len = Math.floor(actx.sampleRate * (strong ? 0.06 : 0.02));
+    const buf = actx.createBuffer(1, len, actx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (len * 0.16));
+    const src = actx.createBufferSource();
+    src.buffer = buf;
+    const f = actx.createBiquadFilter();
+    f.type = "bandpass"; f.frequency.value = strong ? 1100 : 2400; f.Q.value = 1.1;
+    const g = actx.createGain();
+    g.gain.value = strong ? 0.9 : 0.45;
+    src.connect(f); f.connect(g); g.connect(actx.destination);
+    src.start();
+  } catch (e) {}
+}
+const hapLabel = $("hapLabel");
+function haptic(strong) {
+  try { if (navigator.vibrate) navigator.vibrate(strong ? [14, 40, 14] : 8); } catch (e) {}
+  try { hapLabel.click(); if (strong) setTimeout(() => { try { hapLabel.click(); } catch (e) {} }, 70); } catch (e) {}
+}
+function shake() {
+  dialSvg.classList.remove("shake");
+  void dialSvg.getBoundingClientRect();
+  dialSvg.classList.add("shake");
+}
+
+const angleOf = (e) => {
+  const r = dialSvg.getBoundingClientRect();
+  return Math.atan2(e.clientY - (r.top + r.height / 2), e.clientX - (r.left + r.width / 2)) * 180 / Math.PI;
+};
+dialSvg.addEventListener("pointerdown", (e) => {
+  if (!dialResolve) return;
+  e.preventDefault();
+  ensureAudio();
+  dragging = true;
+  try { dialSvg.setPointerCapture(e.pointerId); } catch (x) {}
+  lastAng = angleOf(e);
+  lastTick = tickIdx();
+});
+dialSvg.addEventListener("pointermove", (e) => {
+  if (!dragging || !dialResolve) return;
+  const a = angleOf(e);
+  let d = a - lastAng;
+  if (d > 180) d -= 360;
+  if (d < -180) d += 360;
+  lastAng = a;
+  dialTheta += d; dialNet += d;
+  const ti = tickIdx();
+  if (ti !== lastTick) { lastTick = ti; clickSound(false); haptic(false); renderDial(); }
+});
+const endDrag = () => { dragging = false; };
+dialSvg.addEventListener("pointerup", endDrag);
+dialSvg.addEventListener("pointercancel", endDrag);
+
+$("dialOk").onclick = () => {
+  if (!dialResolve) return;
+  ensureAudio();
+  const need = DIRS[dialStep];
+  if (dialNet * need < 2) {
+    lockMsg.textContent = need > 0 ? "오른쪽으로 돌려서 맞춰 주세요." : "왼쪽으로 돌려서 맞춰 주세요.";
+    dialNet = 0;
+    shake(); clickSound(false);
+    return;
+  }
+  dialCombo.push(curNum());
+  clickSound(true); haptic(true);
+  dialStep++; dialNet = 0;
   lockMsg.textContent = "";
-  faceGo.style.display = (!setupMode && m.face && window.PublicKeyCredential) ? "" : "none";
+  if (dialStep >= 3) {
+    const r = dialResolve;
+    dialResolve = null;
+    r(dialCombo.slice());
+  } else updateDialUI();
+};
+
+/* ----- 잠금 흐름 ----- */
+let lockBusy = false;
+function setBusy(b) { lockBusy = b; lockGo.disabled = b; }
+
+async function showLock() {
+  stopDial();
+  setBusy(false);
   lockEl.classList.remove("off");
+  lockMsg.textContent = "";
+  pw1.value = ""; pw2.value = "";
+  if (legacyDb) { try { legacyDb.close(); } catch (e) {} legacyDb = null; }
+  const m = await getAuth();
+  if (m && m.ver === 3) { authMeta = m; startUnlock(); return; }
+  // 새 저장소에 잠금 정보가 없으면, 예전 버전(비밀번호만) 보관함이 있는지 확인
+  legacyDb = await openLegacy();
+  if (legacyDb && legacyDb.objectStoreNames.contains(META)) {
+    const la = await run(legacyDb.transaction(META, "readonly").objectStore(META).get("auth"));
+    if (la && la.chk) { legacyAuth = la; startMigratePw(); return; }
+  }
+  if (legacyDb) { try { legacyDb.close(); } catch (e) {} legacyDb = null; }
+  startSetupPw();
+}
+
+function openLegacy() {
+  return new Promise((resolve) => {
+    try {
+      const r = indexedDB.open(LEGACY);
+      r.onupgradeneeded = () => { try { r.transaction.abort(); } catch (e) {} };  // 없던 DB면 만들지 않음
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => resolve(null);
+      r.onblocked = () => resolve(null);
+    } catch (e) { resolve(null); }
+  });
+}
+
+function setPwPane(title, sub, placeholder, auto, confirmField, btnText) {
+  $("lockTitle").textContent = title;
+  $("lockSub").textContent = sub;
+  pw1.value = ""; pw2.value = "";
+  pw1.placeholder = placeholder;
+  pw1.setAttribute("autocomplete", auto);
+  pw2.style.display = confirmField ? "" : "none";
+  lockGo.textContent = btnText;
+  showPane("pw");
+}
+
+/* 열기: Face ID → 다이얼 → 비밀번호 */
+function startUnlock() {
+  mode = "unlock";
+  $("lockTitle").textContent = "보관함 잠김";
+  if (authMeta.face && window.PublicKeyCredential) {
+    $("lockSub").textContent = "1단계: Face ID";
+    $("faceSkip").style.display = "none";
+    showPane("face");
+  } else startUnlockDial();
+}
+async function startUnlockDial() {
+  mode = "unlock";
+  $("lockTitle").textContent = "보관함 잠김";
+  $("lockSub").textContent = "다이얼을 돌려 번호 3개를 맞춰 주세요.";
+  tmpCombo = await runDial(false);
+  setPwPane("보관함 잠김", "마지막으로 비밀번호를 입력해 주세요.", "비밀번호", "off", false, "열기");
+}
+faceGo.onclick = async () => {
+  lockMsg.textContent = "Face ID 확인 중...";
+  try {
+    await navigator.credentials.get({ publicKey: {
+      challenge: rnd(32),
+      allowCredentials: [{ type: "public-key", id: authMeta.face.credId }],
+      userVerification: "required",
+      timeout: 60000
+    } });
+    lockMsg.textContent = "";
+    startUnlockDial();
+  } catch (e) {
+    lockMsg.textContent = "Face ID가 확인되지 않았어요.";
+    $("faceSkip").style.display = "";
+  }
+};
+$("faceSkip").onclick = () => { lockMsg.textContent = ""; startUnlockDial(); };
+
+async function submitUnlock() {
+  const wait = lockedUntil - Date.now();
+  if (wait > 0) { lockMsg.textContent = `${Math.ceil(wait / 1000)}초 뒤에 다시 시도해 주세요.`; return; }
+  const a = pw1.value;
+  if (!a || !tmpCombo) return;
+  setBusy(true);
+  lockMsg.textContent = "확인 중...";
+  let ok = false;
+  try {
+    const m = authMeta;
+    const kekRaw = await deriveRaw(a + "\u0000" + tmpCombo.join("-"), m.salt, m.iter);
+    const kek = await importKey(kekRaw);
+    try {
+      const dkRaw = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: m.wIv }, kek, m.wrapped));
+      const k = await importKey(dkRaw);
+      const out = await crypto.subtle.decrypt({ name: "AES-GCM", iv: m.chkIv }, k, m.chk);
+      if (td.decode(out) === "vault-ok") { key = k; ok = true; }
+    } catch (e) {}
+  } catch (e) {
+    lockMsg.textContent = "오류: " + e.message;
+    setBusy(false);
+    return;
+  }
+  tmpCombo = null;
+  if (ok) {
+    fails = 0;
+    try { await enterVault(); } catch (e) { lockMsg.textContent = "오류: " + e.message; }
+    setBusy(false);
+  } else {
+    fails++;
+    if (fails >= 5) lockedUntil = Date.now() + Math.min(300, 30 * (fails - 4)) * 1000;
+    setBusy(false);
+    startUnlockDial();
+    lockMsg.textContent = "맞지 않아요. 번호부터 다시 맞춰 주세요.";
+  }
+}
+
+/* 새로 만들기 */
+async function askNewCombo() {
+  while (true) {
+    $("lockSub").textContent = "다이얼 번호 3개를 정해서 돌려 주세요. (오른쪽 → 왼쪽 → 오른쪽) 정한 번호는 꼭 기억해 두세요.";
+    const c1 = await runDial(true);
+    $("lockSub").textContent = "확인을 위해 같은 번호를 한 번 더 맞춰 주세요.";
+    const c2 = await runDial(false);
+    if (c1.join("-") === c2.join("-")) return c1;
+    lockMsg.textContent = "두 번이 달라요. 처음부터 다시 정해 주세요.";
+  }
+}
+async function createVault(pw, combo, dkRaw) {
+  dkRaw = dkRaw || rnd(32);
+  const salt = rnd(16), iter = 250000;
+  const kekRaw = await deriveRaw(pw + "\u0000" + combo.join("-"), salt, iter);
+  const kek = await importKey(kekRaw);
+  const wIv = rnd(12);
+  const wrapped = await crypto.subtle.encrypt({ name: "AES-GCM", iv: wIv }, kek, dkRaw);
+  key = await importKey(dkRaw);
+  const c = await encBytes(te.encode("vault-ok"));
+  await run(store(META, "readwrite").put({ id: "auth", ver: 3, salt, iter, wIv, wrapped, chkIv: c.iv, chk: c.data }));
+}
+
+function startSetupPw() {
+  mode = "setup";
+  setPwPane("비밀번호 만들기",
+    isIosTab() ? "여기서 만들면 나중에 사라질 수 있어요. 공유 → 홈 화면에 추가를 한 뒤, 그 아이콘으로 열어서 만들어 주세요."
+               : "8자 이상으로 만들어 주세요. 잊어버리면 복구할 수 없어요.",
+    "새 비밀번호", "new-password", true, "다음");
+}
+async function submitSetup() {
+  const a = pw1.value;
+  if (a.length < 8) { lockMsg.textContent = "8자 이상으로 만들어 주세요."; return; }
+  if (a !== pw2.value) { lockMsg.textContent = "두 비밀번호가 달라요."; return; }
+  setBusy(true);
+  lockMsg.textContent = "";
+  try {
+    const combo = await askNewCombo();
+    lockMsg.textContent = "만드는 중...";
+    await createVault(a, combo);
+    await enterVault();
+  } catch (e) {
+    key = null;
+    lockMsg.textContent = "오류: " + e.message;
+    startSetupPw();
+  }
+  setBusy(false);
+}
+
+/* 예전 보관함(비밀번호만) → 새 보관함으로 옮기기 */
+function startMigratePw() {
+  mode = "migrate";
+  setPwPane("보관함 업그레이드",
+    "다이얼 잠금이 추가됐어요. 먼저 지금 쓰는 비밀번호를 입력해 주세요. 사진과 영상은 그대로 옮겨져요.",
+    "지금 비밀번호", "current-password", false, "다음");
+}
+async function submitMigrate() {
+  const wait = lockedUntil - Date.now();
+  if (wait > 0) { lockMsg.textContent = `${Math.ceil(wait / 1000)}초 뒤에 다시 시도해 주세요.`; return; }
+  const a = pw1.value;
+  if (!a) return;
+  setBusy(true);
+  lockMsg.textContent = "확인 중...";
+  try {
+    const raw = await deriveRaw(a, legacyAuth.salt, legacyAuth.iter);
+    const k = await importKey(raw);
+    let ok = false;
+    try {
+      const out = await crypto.subtle.decrypt({ name: "AES-GCM", iv: legacyAuth.chkIv }, k, legacyAuth.chk);
+      ok = td.decode(out) === "vault-ok";
+    } catch (e) {}
+    if (!ok) {
+      fails++;
+      if (fails >= 5) lockedUntil = Date.now() + Math.min(300, 30 * (fails - 4)) * 1000;
+      lockMsg.textContent = "비밀번호가 맞지 않아요.";
+      setBusy(false);
+      return;
+    }
+    fails = 0;
+    legacyKey = k;
+    const combo = await askNewCombo();
+    lockMsg.textContent = "옮기는 중... 닫지 말고 기다려 주세요.";
+    await migrateData(a, combo);
+    await enterVault();
+  } catch (e) {
+    lockMsg.textContent = "오류: " + e.message + " (기존 데이터는 그대로예요)";
+    startMigratePw();
+  }
+  setBusy(false);
+}
+async function migrateData(pw, combo) {
+  const dkRaw = rnd(32);
+  const newKey = await importKey(dkRaw);
+  const lt = (name) => legacyDb.transaction(name, "readonly").objectStore(name);
+  for (const s of [PHOTOS, ALBUMS, VIDS, META]) await run(store(s, "readwrite").clear());
+  const copyJson = async (name) => {
+    const recs = await run(lt(name).getAll());
+    let c = 0;
+    for (const r of recs) {
+      if (r.v !== 2) continue;
+      const o = JSON.parse(td.decode(await decBytes(r.iv, r.data, legacyKey)));
+      const e = await encBytes(te.encode(JSON.stringify(o)), newKey);
+      await run(store(name, "readwrite").put({ id: r.id, v: 2, iv: e.iv, data: e.data }));
+      c++;
+    }
+    if (c !== recs.length) throw new Error("일부 항목을 옮길 수 없어요");
+    return c;
+  };
+  const pc = await copyJson(PHOTOS);
+  await copyJson(ALBUMS);
+  if (legacyDb.objectStoreNames.contains(VIDS)) {
+    const ids = await run(lt(VIDS).getAllKeys());
+    let n = 0;
+    for (const id of ids) {
+      lockMsg.textContent = `영상 옮기는 중... (${++n}/${ids.length})`;
+      const r = await run(lt(VIDS).get(id));
+      const buf = await decBytes(r.iv, r.data, legacyKey);
+      const e = await encBytes(buf, newKey);
+      await run(store(VIDS, "readwrite").put({ id, iv: e.iv, data: e.data, vtype: r.vtype }));
+    }
+  }
+  const check = await run(store(PHOTOS, "readonly").count());
+  if (check !== pc) throw new Error("옮긴 개수가 맞지 않아요");
+  await createVault(pw, combo, dkRaw);     // 잠금 정보는 맨 마지막에 저장
+  try { legacyDb.close(); indexedDB.deleteDatabase(LEGACY); } catch (e) {}
+  legacyDb = null; legacyKey = null;
 }
 
 async function enterVault() {
+  stopDial();
   lockMsg.textContent = "";
   pw1.value = ""; pw2.value = "";
   statusEl.textContent = "";
@@ -621,7 +986,7 @@ async function enterVault() {
 }
 
 function lockNow() {
-  key = null; vaultRaw = null;
+  key = null; tmpCombo = null;
   photos = []; albums = [];
   closeViewer();
   grid.innerHTML = "";
@@ -631,57 +996,14 @@ function lockNow() {
   showLock();
 }
 
-async function submitLock() {
-  if (lockGo.disabled) return;
-  const a = pw1.value;
-  if (setupMode) {
-    if (a.length < 8) { lockMsg.textContent = "8자 이상으로 만들어 주세요."; return; }
-    if (a !== pw2.value) { lockMsg.textContent = "두 비밀번호가 달라요."; return; }
-    lockGo.disabled = true;
-    lockMsg.textContent = "만드는 중...";
-    try {
-      const salt = rnd(16), iter = 250000;
-      const raw = await deriveRaw(a, salt, iter);
-      key = await importKey(raw);
-      vaultRaw = raw;
-      const c = await encBytes(te.encode("vault-ok"));
-      await run(store(META, "readwrite").put({ id: "auth", salt, iter, chkIv: c.iv, chk: c.data }));
-      await enterVault();
-    } catch (e) {
-      key = null; vaultRaw = null;
-      lockMsg.textContent = "오류: " + e.message;
-    }
-    lockGo.disabled = false;
-    return;
-  }
-  const wait = lockedUntil - Date.now();
-  if (wait > 0) { lockMsg.textContent = `${Math.ceil(wait / 1000)}초 뒤에 다시 시도해 주세요.`; return; }
-  if (!a) return;
-  lockGo.disabled = true;
-  lockMsg.textContent = "확인 중...";
-  try {
-    const m = await getAuth();
-    const raw = await deriveRaw(a, m.salt, m.iter);
-    const k = await importKey(raw);
-    let ok = false;
-    try {
-      const out = await crypto.subtle.decrypt({ name: "AES-GCM", iv: m.chkIv }, k, m.chk);
-      ok = td.decode(out) === "vault-ok";
-    } catch (e) {}
-    if (!ok) {
-      fails++;
-      if (fails >= 5) lockedUntil = Date.now() + Math.min(300, 30 * (fails - 4)) * 1000;
-      lockMsg.textContent = "비밀번호가 맞지 않아요.";
-    } else {
-      fails = 0; key = k; vaultRaw = raw;
-      await enterVault();
-    }
-  } catch (e) {
-    lockMsg.textContent = "오류: " + e.message;
-  }
-  lockGo.disabled = false;
+function submitLock() {
+  if (lockBusy) return;
+  if (mode === "unlock") submitUnlock();
+  else if (mode === "setup") submitSetup();
+  else if (mode === "migrate") submitMigrate();
 }
 
+/* ----- Face ID 켜기/끄기 (1단계 확인용) ----- */
 async function updateFaceBtn() {
   const b = $("faceBtn");
   if (!window.PublicKeyCredential) { b.style.display = "none"; return; }
@@ -690,7 +1012,6 @@ async function updateFaceBtn() {
   b.textContent = m && m.face ? "Face ID 끄기" : "Face ID 켜기";
 }
 async function enableFace() {
-  if (!vaultRaw) return;
   try {
     const cred = await navigator.credentials.create({ publicKey: {
       challenge: rnd(32),
@@ -700,15 +1021,12 @@ async function enableFace() {
       authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required" },
       timeout: 60000
     } });
-    const dk = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
-    const iv = rnd(12);
-    const wrapped = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, dk, vaultRaw);
     const m = await getAuth();
-    m.face = { credId: cred.rawId, dk, iv, wrapped };
+    m.face = { credId: cred.rawId };
     await run(store(META, "readwrite").put(m));
-    statusEl.textContent = "Face ID를 켰어요. 잠긴 뒤 'Face ID로 열기'를 눌러 보세요.";
+    statusEl.textContent = "Face ID를 켰어요. 다음에 잠기면 Face ID부터 시작해요.";
   } catch (e) {
-    statusEl.textContent = "이 화면에서는 Face ID를 쓸 수 없어요 (" + (e.name || "오류") + ").";
+    statusEl.textContent = "Face ID를 켤 수 없어요 (" + (e.name || "오류") + ").";
   }
   updateFaceBtn();
 }
@@ -719,40 +1037,20 @@ async function disableFace() {
   statusEl.textContent = "Face ID를 껐어요.";
   updateFaceBtn();
 }
-async function unlockWithFace() {
-  const m = await getAuth();
-  if (!m || !m.face) return;
-  lockMsg.textContent = "Face ID 확인 중...";
-  try {
-    await navigator.credentials.get({ publicKey: {
-      challenge: rnd(32),
-      allowCredentials: [{ type: "public-key", id: m.face.credId }],
-      userVerification: "required",
-      timeout: 60000
-    } });
-    const raw = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: m.face.iv }, m.face.dk, m.face.wrapped));
-    key = await importKey(raw);
-    vaultRaw = raw;
-    await enterVault();
-  } catch (e) {
-    key = null; vaultRaw = null;
-    lockMsg.textContent = "Face ID로 열지 못했어요. 비밀번호로 열어 주세요.";
-  }
-}
 
 lockGo.onclick = submitLock;
 [pw1, pw2].forEach(el => el.addEventListener("keydown", (e) => { if (e.key === "Enter") submitLock(); }));
-faceGo.onclick = unlockWithFace;
 $("lockBtn").onclick = lockNow;
 $("faceBtn").onclick = async () => {
   const m = await getAuth();
   if (m && m.face) disableFace(); else enableFace();
 };
 
-// 다른 앱으로 나갔다가 15초 넘게 지나 돌아오면 자동 잠금
+// 다른 앱으로 나갔다가 5분 넘게 지나 돌아오면 자동 잠금
+const AUTO_LOCK_MS = 5 * 60 * 1000;
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) hiddenAt = Date.now();
-  else if (key && hiddenAt && Date.now() - hiddenAt > 15000) lockNow();
+  else if (key && hiddenAt && Date.now() - hiddenAt > AUTO_LOCK_MS) lockNow();
 });
 
 (async function init() {
